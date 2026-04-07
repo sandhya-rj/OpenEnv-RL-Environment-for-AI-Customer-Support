@@ -6,5 +6,15 @@ authors = [{name = "Sandhya RJ"}]
 readme = "README.md"
 requires-python = ">=3.9"
 
+dependencies = [
+  "openenv-core>=0.2.0",
+  "pydantic>=2.0",
+  "openai>=1.10.0",
+  "PyYAML>=6.0"
+]
+
+[project.scripts]
+server = "server.app:app"
+
 [tool.openenv]
 env = "CustomerSupportEnv-v1"
