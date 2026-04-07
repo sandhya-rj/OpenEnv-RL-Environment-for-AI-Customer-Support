@@ -1,4 +1,6 @@
-pydantic>=2.0,<3
-openai>=1.10.0
-PyYAML>=6.0
-pytest>=7.4.0
+openai==2.30.0
+pydantic==2.12.5
+PyYAML==6.0.3
+pytest==8.4.2
+httpx==0.28.1
+tqdm==4.67.3
