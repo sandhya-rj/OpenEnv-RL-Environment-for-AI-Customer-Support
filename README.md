@@ -290,9 +290,24 @@ print(env.render())   # human-readable debug view
 
 ---
 
-## Inference Script
+## Inference Script + HTTP Server
 
-`inference.py` runs a complete episode using any OpenAI-compatible endpoint and emits structured log lines.
+`inference.py` does two things when the container starts:
+
+1. **Launches inference** in a background daemon thread — runs one complete episode and emits `[START]`/`[STEP]`/`[END]` logs to stdout
+2. **Starts an HTTP server** on port `7860` in the main thread — keeps the container alive (required by Hugging Face Spaces) and exposes a live REST API
+
+### Container Lifecycle
+
+```
+CMD ["python", "inference.py"]
+        │
+        ├── Thread: run_inference()     ← episode runs once, logs to stdout
+        │
+        └── Main:   start_http_server() ← blocks forever on port 7860
+```
+
+`[END]` is guaranteed to print even if the inference thread crashes, via a `finally:` block. The HTTP server keeps the container healthy regardless of inference outcome.
 
 ### Log Format (strict)
 
@@ -303,13 +318,13 @@ print(env.render())   # human-readable debug view
 ```
 
 **Guarantees**:
-- `[END]` always prints — even on unexpected exceptions (via `finally:` block)
+- `[END]` always prints — even on unexpected exceptions (`finally:` block)
 - Reward formatted to exactly **2 decimal places**
 - Booleans always lowercase: `true` / `false`
 - `error` field always present — `null` when no error occurred
 - All print calls use `flush=True` for container log streaming
 
-### Actual Inference Output (gpt-4o-mini, task=hard, scenario=ref_001)
+### Actual Verified Log Output (task=hard, scenario=ref_001)
 
 ```
 [START] task=hard env=CustomerSupportEnv-v1 model=gpt-4o-mini
@@ -318,7 +333,41 @@ print(env.render())   # human-readable debug view
 [END] success=false steps=2 score=0.3625 rewards=0.53,0.36
 ```
 
-> When `HF_TOKEN` or `API_BASE_URL` is unavailable, the script uses a professional fallback response and continues — `[END]` is always printed.
+> When `HF_TOKEN` / `API_BASE_URL` are unavailable, the script uses a professional fallback response and continues — `[END]` always prints.
+
+---
+
+## HTTP API (port 7860)
+
+The server exposes a live OpenEnv REST API. All responses are JSON (except `GET /` which returns HTML).
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/` | `GET` | HTML status page — shows episode result, logs, and API reference |
+| `/health` | `GET` | `{"status": "ok"}` — used by HF health checks |
+| `/reset` | `POST` | Start a new episode. Body: `{"task_name": "hard", "scenario_id": "ref_001"}` (both optional). Returns `Observation` JSON |
+| `/step` | `POST` | Take one action. Body: `{"response": "..."}`. Returns `{observation, reward, done, info}` |
+| `/state` | `GET` | Current `EpisodeState` snapshot |
+
+### Example: full programmatic episode via HTTP
+
+```bash
+# Start new episode
+curl -X POST http://localhost:7860/reset \
+  -H 'Content-Type: application/json' \
+  -d '{"task_name": "hard", "scenario_id": "ref_001"}'
+
+# Take a step
+curl -X POST http://localhost:7860/step \
+  -H 'Content-Type: application/json' \
+  -d '{"response": "I sincerely apologize. I have approved a full refund within 3-5 business days."}'
+
+# Inspect state
+curl http://localhost:7860/state
+
+# Health check
+curl http://localhost:7860/health
+```
 
 ---
 
@@ -414,8 +463,8 @@ Expected output:
 # Build — runs all 143 tests as a build-time regression gate
 docker build -t support-env .
 
-# Run inference (pass env vars at runtime)
-docker run \
+# Run — HTTP server starts on port 7860, inference runs in background thread
+docker run -p 7860:7860 \
   -e API_BASE_URL="https://router.huggingface.co/v1" \
   -e MODEL_NAME="meta-llama/Llama-3.1-8B-Instruct" \
   -e HF_TOKEN="hf_..." \
@@ -424,12 +473,21 @@ docker run \
   support-env
 
 # Override to a specific scenario
-docker run -e HF_TOKEN="hf_..." -e SCENARIO_ID="ref_001" support-env
+docker run -p 7860:7860 -e HF_TOKEN="hf_..." -e SCENARIO_ID="ref_001" support-env
+
+# Test without a real model (fallback response activates automatically)
+docker run -p 7860:7860 support-env
 ```
 
 **Build-time gates** (both must pass before `CMD` is reached):
 1. Import health check — all packages verified importable
 2. `python3 -m pytest tests/ -q` — all 143 tests must pass
+
+**Runtime behaviour**:
+- `[SERVER] Listening on http://0.0.0.0:7860` printed immediately
+- Inference episode starts in a background thread
+- `[START]` / `[STEP]` / `[END]` logs stream to stdout
+- Container stays alive; `GET /health` always returns `200`
 
 ---
 

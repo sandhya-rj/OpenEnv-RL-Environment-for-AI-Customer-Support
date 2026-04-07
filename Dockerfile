@@ -53,6 +53,10 @@ ENV HF_TOKEN=""
 ENV TASK_NAME="hard"
 ENV SCENARIO_ID=""
 ENV SEED="42"
+ENV PORT="7860"
+
+# ── Expose HTTP port (required by Hugging Face Spaces) ───────────────────────
+EXPOSE 7860
 
 # ── Health check: verify all package imports work ─────────────────────────────
 RUN python -c "\
