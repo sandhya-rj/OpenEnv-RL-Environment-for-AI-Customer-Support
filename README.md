@@ -1,3 +1,14 @@
+---
+title: Customer Support Env
+emoji: 🤖
+colorFrom: blue
+colorTo: green
+sdk: docker
+sdk_version: "latest"
+app_file: inference.py
+pinned: false
+---
+
 # CustomerSupportEnv — OpenEnv RL Environment for AI Customer Support
 
 > A **production-grade reinforcement learning environment** where an AI agent learns to resolve real-world customer support interactions — accurately, empathetically, and efficiently.
