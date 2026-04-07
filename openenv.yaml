@@ -1,0 +1,247 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# OpenEnv Environment Specification
+# CustomerSupportEnv — AI Customer Support Reinforcement Learning Environment
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: CustomerSupportEnv
+version: "2.0.0"
+description: >
+  An OpenEnv reinforcement learning environment where an AI agent handles
+  real-world customer support interactions including order delays, refund
+  requests, and escalating complaints. The agent is evaluated at each step
+  on intent detection accuracy, resolution correctness, politeness, and
+  empathetic language. Rewards are continuous and dense, providing a learning
+  signal at every step of the episode.
+
+# Environment entry point
+entry_point: "core.env:CustomerSupportEnv"
+env_class: CustomerSupportEnv
+env_name: CustomerSupportEnv-v1
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Package structure
+# ─────────────────────────────────────────────────────────────────────────────
+packages:
+  - core/           # env.py, state_manager.py
+  - domain/         # models.py, schemas.py
+  - logic/          # graders.py, reward.py, tasks.py
+  - utils/          # text_processing.py, scoring_utils.py, validation_utils.py
+  - config/         # config.py
+  - tests/          # test_env.py, test_graders.py, test_tasks.py
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Observation Space
+# ─────────────────────────────────────────────────────────────────────────────
+observation_space:
+  type: object
+  description: >
+    The observation provided to the agent at each step, describing the current
+    state of the customer interaction.
+  properties:
+    query:
+      type: string
+      description: >
+        The current customer message. Initially the opening query; may change
+        to a follow-up after the agent's first response.
+    sentiment:
+      type: string
+      enum: [happy, neutral, angry]
+      description: Detected emotional sentiment of the customer.
+    history:
+      type: array
+      items:
+        type: string
+      description: >
+        Ordered list of all agent responses given in the current episode.
+        Empty on the first step.
+    step_number:
+      type: integer
+      minimum: 0
+      description: >
+        Current step index (0-based). 0 on the first observation from reset().
+    intent:
+      type: string
+      enum: [refund, delay, complaint, unknown]
+      description: >
+        The ground-truth intent of the customer query, as determined by the
+        scenario definition. Provided to the agent as context.
+    episode_done:
+      type: boolean
+      description: True when the episode has terminated.
+  required:
+    - query
+    - sentiment
+    - history
+    - step_number
+    - intent
+    - episode_done
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Action Space
+# ─────────────────────────────────────────────────────────────────────────────
+action_space:
+  type: object
+  description: >
+    The action the agent takes at each step — a natural-language response to
+    the customer.
+  properties:
+    response:
+      type: string
+      minLength: 1
+      description: >
+        The agent's text response to the customer. Must be non-empty.
+        Will be appended to observation.history in the next step.
+  required:
+    - response
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Reward Space
+# ─────────────────────────────────────────────────────────────────────────────
+reward_space:
+  type: number
+  minimum: -1.0
+  maximum: 1.0
+  description: >
+    Continuous reward at each step in [-1.0, 1.0].
+
+    reward = task_score - (irrelevance_penalty + repetition_penalty + step_penalty)
+
+    task_score is a weighted combination of:
+      - intent detection accuracy
+      - resolution correctness
+      - politeness score
+      - empathy score
+    (weights vary by task difficulty — see tasks section)
+
+    Penalties applied for:
+      - irrelevant responses (low keyword overlap with customer query)
+      - repeated responses (high 4-gram Jaccard similarity to prior turns)
+      - unnecessary extra steps (smooth logistic curve after step 2)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Episode Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+episode:
+  max_steps: 5
+  termination_conditions:
+    - max_steps_reached: "step >= max_steps"
+    - early_success: "task_score >= task.score_threshold"
+  termination_note: >
+    Episodes terminate early when the agent achieves a task score above the
+    task-specific threshold (0.88 easy / 0.82 medium / 0.78 hard), rewarding
+    efficient resolution without unnecessary prolonged interaction.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tasks
+# ─────────────────────────────────────────────────────────────────────────────
+tasks:
+  - name: easy
+    difficulty: easy
+    score_threshold: 0.88
+    description: >
+      Detect the customer's intent (refund / delay / complaint) and name it
+      explicitly in the response.
+    grader: grade_intent_detection
+    score_range: [0.0, 1.0]
+    weights:
+      intent: 1.00
+      resolution: 0.00
+      politeness: 0.00
+      empathy: 0.00
+
+  - name: medium
+    difficulty: medium
+    score_threshold: 0.82
+    description: >
+      Provide the correct resolution: approve refund, provide tracking
+      information, or escalate to a specialist. Also acknowledge the issue type.
+    grader: "0.70 * grade_resolution + 0.30 * grade_intent_detection"
+    score_range: [0.0, 1.0]
+    weights:
+      intent: 0.30
+      resolution: 0.70
+      politeness: 0.00
+      empathy: 0.00
+
+  - name: hard
+    difficulty: hard
+    score_threshold: 0.78
+    description: >
+      Generate a complete, high-quality response: correct resolution, polite
+      professional tone, and genuine empathetic language.
+    grader: >
+      0.40 * grade_resolution
+      + 0.25 * grade_politeness
+      + 0.20 * grade_empathy
+      + 0.15 * grade_intent_detection
+    score_range: [0.0, 1.0]
+    weights:
+      intent: 0.15
+      resolution: 0.40
+      politeness: 0.25
+      empathy: 0.20
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scenario Catalogue
+# ─────────────────────────────────────────────────────────────────────────────
+scenarios:
+  count: 12
+  intents: [refund, delay, complaint]
+  sentiments: [angry, neutral]
+  ids:
+    - ref_001
+    - ref_002
+    - ref_003
+    - ref_004
+    - del_001
+    - del_002
+    - del_003
+    - del_004
+    - cmp_001
+    - cmp_002
+    - cmp_003
+    - cmp_004
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Penalty Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+penalties:
+  irrelevance:
+    max: 0.35
+    free_threshold: 0.15
+    description: >
+      Applied when response content-word overlap with the query is below 15%.
+      Rises smoothly from 0 to max.
+  repetition:
+    max: 0.30
+    sim_threshold: 0.40
+    description: >
+      Applied when 4-gram Jaccard similarity to any prior response exceeds 40%.
+      Rises smoothly from threshold to max.
+  step_cost:
+    max: 0.20
+    description: >
+      Logistic penalty curve applied after step 2 when the issue is unresolved.
+      Discourages unnecessary prolonged interactions.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Metadata
+# ─────────────────────────────────────────────────────────────────────────────
+metadata:
+  author: AI Customer Support Team
+  license: MIT
+  python_requires: ">=3.10"
+  framework: openenv
+  domain: customer-support
+  modality: text
+  tags:
+    - reinforcement-learning
+    - nlp
+    - customer-support
+    - llm-evaluation
+    - openenv
+  dependencies:
+    - "pydantic>=2.0,<3"
+    - "openai>=1.10"
+    - "PyYAML>=6.0"
+    - "pytest>=7.4"
