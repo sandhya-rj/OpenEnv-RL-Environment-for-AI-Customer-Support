@@ -1,0 +1,10 @@
+[project]
+name = "customer-support-env"
+version = "0.1.0"
+description = "OpenEnv RL Environment for AI Customer Support"
+authors = [{name = "Sandhya RJ"}]
+readme = "README.md"
+requires-python = ">=3.9"
+
+[tool.openenv]
+env = "CustomerSupportEnv-v1"

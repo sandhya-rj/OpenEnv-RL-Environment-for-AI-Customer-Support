@@ -1,0 +1,89 @@
+import json, os, sys, threading, traceback, time
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from openai import OpenAI
+from core.env import CustomerSupportEnv
+from domain.models import Action
+from logic.tasks import TASKS
+
+API_BASE_URL = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
+MODEL_NAME = os.environ.get("MODEL_NAME", "gpt-4o-mini")
+HF_TOKEN = os.environ.get("HF_TOKEN", "")
+TASK_NAME = os.environ.get("TASK_NAME", "hard")
+SCENARIO_ID = os.environ.get("SCENARIO_ID", "") or None
+SEED = int(os.environ.get("SEED", "42"))
+PORT = int(os.environ.get("PORT", "7860"))
+
+lock = threading.Lock()
+
+def build_client():
+    return OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN or "placeholder")
+
+def fmt_bool(b):
+    return "true" if b else "false"
+
+def log(line):
+    print(line, flush=True)
+
+def run_inference():
+    client = build_client()
+    env = CustomerSupportEnv(seed=SEED)
+
+    MAX_STEPS = 5  # 🔥 FIX
+    steps = 0
+    rewards = []
+    score = 0.0
+
+    log(f"[START] task={TASK_NAME} env={CustomerSupportEnv.ENV_NAME} model={MODEL_NAME}")
+
+    try:
+        obs = env.reset(scenario_id=SCENARIO_ID, task_name=TASK_NAME)
+        done = False
+
+        while not done and steps < MAX_STEPS:
+
+            try:
+                res = client.chat.completions.create(
+                    model=MODEL_NAME,
+                    messages=[{"role": "user", "content": obs.query}],
+                    max_tokens=200,
+                    timeout=10   # 🔥 FIX
+                )
+                text = res.choices[0].message.content.strip()
+
+            except Exception:
+                text = "Apologies, escalating your issue."
+
+            obs, reward, done, info = env.step(Action(response=text))
+
+            steps = info["step"]
+            rewards.append(reward.value)
+            score = info["task_score"]
+
+            log(f'[STEP] step={steps} action="{text[:80]}" reward={reward.value:.2f} done={fmt_bool(done)} error=null')
+
+        success = score >= 0.5
+
+    except Exception:
+        traceback.print_exc()
+        success = False
+
+    log(f"[END] success={fmt_bool(success)} steps={steps} score={score:.4f}")
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+def start_server():
+    server = HTTPServer(("0.0.0.0", PORT), Handler)
+    print(f"[SERVER] running on {PORT}")
+    server.serve_forever()
+
+if __name__ == "__main__":
+    threading.Thread(target=start_server, daemon=True).start()
+    time.sleep(1)
+    threading.Thread(target=run_inference, daemon=True).start()
+
+    while True:
+        time.sleep(60)
