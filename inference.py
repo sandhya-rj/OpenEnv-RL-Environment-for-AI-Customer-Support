@@ -1,53 +1,20 @@
-"""
-inference.py — Inference loop + HTTP server for the AI Customer Support OpenEnv environment.
-
-Reads all configuration from environment variables:
-  API_BASE_URL  — OpenAI-compatible endpoint base URL
-  MODEL_NAME    — Model identifier string
-  HF_TOKEN      — Bearer token (Hugging Face token or OpenAI key)
-  TASK_NAME     — "easy" | "medium" | "hard"   (default: "hard")
-  SCENARIO_ID   — Specific scenario ID; blank = random selection
-  SEED          — Integer seed for reproducible random selection (default: 42)
-  PORT          — HTTP server port (default: 7860, required by Hugging Face Spaces)
-
-Strict log format
------------------
-  [START] task=<task_name> env=<env_name> model=<model_name>
-  [STEP]  step=<n> action="<text>" reward=<0.00> done=<true|false> error=<null|msg>
-  [END]   success=<true|false> steps=<n> score=<0.0000> rewards=<r1,r2,...>
-
-Rules:
-  • Reward formatted to exactly 2 decimal places
-  • Booleans always lowercase: true / false
-  • error field is always present (null when no error occurred)
-  • [END] is ALWAYS printed — even when an unexpected exception occurs
-
-HTTP API (port 7860 — Hugging Face Spaces requirement)
--------------------------------------------------------
-  GET  /           → HTML status page with episode results
-  GET  /health      → 200 OK  (used by HF health checks)
-  POST /reset       → JSON Observation  (starts a new episode)
-  POST /step        → JSON (observation, reward, done, info)
-  GET  /state       → JSON EpisodeState snapshot
-"""
-
-from __future__ import annotations
+"""OpenEnv inference server for Hugging Face Spaces."""
 
 import json
 import os
-import sys
 import threading
-import traceback
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any, Dict, List, Optional
+import traceback
+from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any, Dict, Optional
 
 from openai import OpenAI
+
 from core.env import CustomerSupportEnv
 from domain.models import Action
 from logic.tasks import TASKS
 
-# ---------------- CONFIG ----------------
 API_BASE_URL = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
 MODEL_NAME = os.environ.get("MODEL_NAME", "gpt-4o-mini")
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
@@ -56,135 +23,211 @@ SCENARIO_ID = os.environ.get("SCENARIO_ID", "") or None
 SEED = int(os.environ.get("SEED", "42"))
 PORT = int(os.environ.get("PORT", "7860"))
 
-# ---------------- STATE ----------------
-_episode_lock = threading.Lock()
-_episode_env = None
-_episode_result = {
-    "status": "pending",
-    "steps": 0,
-    "score": 0.0,
-    "success": False,
-    "rewards": [],
-    "logs": [],
-}
+MAX_STEPS = 5
+OPENAI_TIMEOUT = 10
+MAX_TOKENS = 256
+FALLBACK_RESPONSE = "I apologize for the issue. I am escalating this to support."
 
-# ---------------- CLIENT ----------------
-def build_client():
-    return OpenAI(
-        base_url=API_BASE_URL,
-        api_key=HF_TOKEN or "placeholder"
-    )
 
-# ---------------- LOG ----------------
-def _fmt_bool(b):
-    return "true" if b else "false"
-
-def _emit(line):
+def log(line: str) -> None:
     print(line, flush=True)
-    with _episode_lock:
-        _episode_result["logs"].append(line)
 
-# ---------------- INFERENCE ----------------
-def run_inference():
-    global _episode_env
 
+def build_client() -> OpenAI:
+    return OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN or "placeholder")
+
+
+def model_to_dict(obj: Any) -> Any:
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump()
+    return obj
+
+
+@dataclass
+class SharedState:
+    env: CustomerSupportEnv = field(default_factory=lambda: CustomerSupportEnv(seed=SEED))
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    last_observation: Optional[Dict[str, Any]] = None
+    last_step: Optional[Dict[str, Any]] = None
+    inference_finished: bool = False
+
+
+STATE = SharedState()
+
+
+def json_response(handler: BaseHTTPRequestHandler, status_code: int, payload: Dict[str, Any]) -> None:
+    data = json.dumps(payload).encode("utf-8")
+    handler.send_response(status_code)
+    handler.send_header("Content-Type", "application/json")
+    handler.send_header("Content-Length", str(len(data)))
+    handler.end_headers()
+    handler.wfile.write(data)
+
+
+def parse_json_body(handler: BaseHTTPRequestHandler) -> Dict[str, Any]:
+    content_length = int(handler.headers.get("Content-Length", "0") or "0")
+    if content_length == 0:
+        return {}
+    raw = handler.rfile.read(content_length)
+    if not raw:
+        return {}
+    return json.loads(raw.decode("utf-8"))
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, format: str, *args: Any) -> None:
+        return
+
+    def do_GET(self) -> None:
+        if self.path == "/health":
+            json_response(self, 200, {"status": "healthy"})
+            return
+        if self.path == "/state":
+            with STATE.lock:
+                json_response(
+                    self,
+                    200,
+                    {
+                        "observation": STATE.last_observation,
+                        "last_step": STATE.last_step,
+                        "done": STATE.inference_finished,
+                    },
+                )
+            return
+        if self.path == "/":
+            json_response(self, 200, {"status": "ok", "service": "openenv-inference"})
+            return
+        json_response(self, 404, {"error": "not_found"})
+
+    def do_POST(self) -> None:
+        if self.headers.get("Content-Type") != "application/json":
+            json_response(self, 400, {"error": "Content-Type must be application/json"})
+            return
+
+        try:
+            body = parse_json_body(self)
+        except Exception:
+            json_response(self, 400, {"error": "invalid_json"})
+            return
+
+        if self.path == "/reset":
+            task_name = body.get("task_name", TASK_NAME)
+            scenario_id = body.get("scenario_id", SCENARIO_ID)
+            if task_name not in TASKS:
+                task_name = TASK_NAME if TASK_NAME in TASKS else "hard"
+
+            try:
+                with STATE.lock:
+                    obs = STATE.env.reset(scenario_id=scenario_id, task_name=task_name)
+                    obs_dict = model_to_dict(obs)
+                    STATE.last_observation = obs_dict
+                json_response(self, 200, obs_dict)
+            except Exception as exc:
+                json_response(self, 500, {"error": "reset_failed", "message": str(exc)})
+            return
+
+        if self.path == "/step":
+            response_text = body.get("response") or body.get("action") or FALLBACK_RESPONSE
+            try:
+                with STATE.lock:
+                    obs, reward, done, info = STATE.env.step(Action(response=response_text))
+                    payload = {
+                        "observation": model_to_dict(obs),
+                        "reward": model_to_dict(reward),
+                        "done": done,
+                        "info": info,
+                    }
+                    STATE.last_observation = payload["observation"]
+                    STATE.last_step = payload
+                json_response(self, 200, payload)
+            except Exception as exc:
+                json_response(self, 500, {"error": "step_failed", "message": str(exc)})
+            return
+
+        json_response(self, 404, {"error": "not_found"})
+
+
+def run_inference() -> None:
     client = build_client()
-    env = CustomerSupportEnv(seed=SEED)
-    task = TASKS[TASK_NAME]
+    task_name = TASK_NAME if TASK_NAME in TASKS else "hard"
 
-    MAX_STEPS = 5   # 🔥 critical fix
-
-    steps_done = 0
+    steps = 0
+    score = 0.0
     rewards = []
-    final_score = 0.0
     success = False
-
-    with _episode_lock:
-        _episode_result["status"] = "running"
-        _episode_env = env
-
-    _emit(f"[START] task={TASK_NAME} env={CustomerSupportEnv.ENV_NAME} model={MODEL_NAME}")
+    log(f"[START] task={task_name} env={CustomerSupportEnv.ENV_NAME} model={MODEL_NAME}")
 
     try:
-        obs = env.reset(scenario_id=SCENARIO_ID, task_name=TASK_NAME)
+        with STATE.lock:
+            obs = STATE.env.reset(scenario_id=SCENARIO_ID, task_name=task_name)
+
         done = False
-
-        while not done and steps_done < MAX_STEPS:
-
-            error_field = "null"
-            action_text = ""
-
+        while (not done) and steps < MAX_STEPS:
+            error_msg = None
             try:
                 completion = client.chat.completions.create(
                     model=MODEL_NAME,
                     messages=[{"role": "user", "content": obs.query}],
-                    max_tokens=256,
-                    temperature=0.3,
-                    timeout=10   # 🔥 critical fix
+                    max_tokens=MAX_TOKENS,
+                    timeout=OPENAI_TIMEOUT,
                 )
+                text = (completion.choices[0].message.content or "").strip() or FALLBACK_RESPONSE
+            except Exception as exc:
+                error_msg = str(exc)
+                text = FALLBACK_RESPONSE
 
-                action_text = completion.choices[0].message.content.strip()
+            try:
+                with STATE.lock:
+                    obs, reward, done, info = STATE.env.step(Action(response=text))
+                    steps = info.get("step", steps + 1)
+                    score = float(info.get("task_score", 0.0))
+                    rewards.append(float(reward.value))
+                    STATE.last_observation = model_to_dict(obs)
+                    STATE.last_step = {
+                        "observation": model_to_dict(obs),
+                        "reward": model_to_dict(reward),
+                        "done": done,
+                        "info": info,
+                    }
 
-                if not action_text:
-                    raise ValueError("Empty response")
+                error_value = "null" if error_msg is None else error_msg.replace('"', "'")
+                safe_action = text.replace('"', "'")[:120]
+                log(
+                    f'[STEP] step={steps} action="{safe_action}" reward={reward.value:.2f} '
+                    f'done={str(done).lower()} error={error_value}'
+                )
+            except Exception as step_exc:
+                safe_action = text.replace('"', "'")[:120]
+                log(
+                    f'[STEP] step={steps} action="{safe_action}" reward=0.00 '
+                    f'done=false error={str(step_exc).replace("\"", "\'")}'
+                )
+                break
 
-            except Exception as e:
-                error_field = str(e)[:100]
-                action_text = "Apologies, escalating your issue immediately."
-
-            action = Action(response=action_text)
-            obs, reward, done, info = env.step(action)
-
-            steps_done = info["step"]
-            rewards.append(reward.value)
-            final_score = info["task_score"]
-
-            _emit(
-                f'[STEP] step={steps_done} action="{action_text[:100]}" '
-                f'reward={reward.value:.2f} done={_fmt_bool(done)} error={error_field}'
-            )
-
-            success = final_score >= 0.5
-
+        success = score >= 0.5
     except Exception:
         traceback.print_exc()
         success = False
-
     finally:
-        rewards_str = ",".join(f"{r:.2f}" for r in rewards) if rewards else "none"
-
-        _emit(
-            f"[END] success={_fmt_bool(success)} "
-            f"steps={steps_done} score={final_score:.4f} rewards={rewards_str}"
+        STATE.inference_finished = True
+        rewards_text = ",".join(f"{r:.2f}" for r in rewards)
+        log(
+            f"[END] success={str(success).lower()} steps={steps} score={score:.4f} rewards={rewards_text}"
         )
 
-# ---------------- SERVER ----------------
-class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == "/health":
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"ok")
-        else:
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"running")
 
-def start_server():
-    server = HTTPServer(("0.0.0.0", PORT), Handler)
-    print(f"[SERVER] running on {PORT}")
+def start_http_server() -> None:
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    print(f"[SERVER] running on {PORT}", flush=True)
     server.serve_forever()
 
-# ---------------- MAIN ----------------
+
 if __name__ == "__main__":
-    try:
-        threading.Thread(target=start_server, daemon=True).start()
-        time.sleep(1)
+    server_thread = threading.Thread(target=start_http_server, daemon=True)
+    server_thread.start()
 
-        threading.Thread(target=run_inference, daemon=True).start()
+    inference_thread = threading.Thread(target=run_inference, daemon=True)
+    inference_thread.start()
 
-        while True:
-            time.sleep(60)
-
-    except KeyboardInterrupt:
-        sys.exit(0)
+    while True:
+        time.sleep(60)
