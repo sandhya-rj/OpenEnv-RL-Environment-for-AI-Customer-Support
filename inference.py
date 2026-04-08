@@ -164,50 +164,6 @@ class Handler(BaseHTTPRequestHandler):
 
         json_response(self, 404, {"error": "not_found"})
 
-# ---------------- INFERENCE ----------------
-def run_inference():
-    client = build_client()
-    steps = 0
-    rewards = []
-    score = 0.0
-
-    log(f"[START] task={TASK_NAME} env={CustomerSupportEnv.ENV_NAME} model={MODEL_NAME}")
-
-    try:
-        with STATE.lock:
-            obs = STATE.env.reset(scenario_id=SCENARIO_ID, task_name=TASK_NAME)
-
-        done = False
-        while not done and steps < MAX_STEPS:
-            call_started = time.monotonic()
-            try:
-                completion = client.chat.completions.create(
-                    model=MODEL_NAME,
-                    messages=[{"role": "user", "content": obs.query}],
-                    max_tokens=MAX_TOKENS,
-                    timeout=min(OPENAI_TIMEOUT, 2),
-                )
-                text = (completion.choices[0].message.content or "").strip() or FALLBACK_RESPONSE
-                if (time.monotonic() - call_started) > 2:
-                    text = FALLBACK_RESPONSE
-            except Exception:
-                text = FALLBACK_RESPONSE
-
-            with STATE.lock:
-                obs, reward, done, info = STATE.env.step(Action(response=text))
-                steps = info.get("step", steps + 1)
-                if steps >= 2:
-                    done = True
-                score = float(info.get("task_score", 0.0))
-                rewards.append(float(reward.value))
-
-            log(f'[STEP] step={steps} reward={reward.value:.2f} done={str(done).lower()} error=null')
-
-    except Exception:
-        traceback.print_exc()
-
-    log(f"[END] success={str(score>=0.5).lower()} steps={steps} score={score:.4f}")
-
 # ---------------- MAIN ----------------
 def start_server():
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
@@ -215,9 +171,4 @@ def start_server():
     server.serve_forever()
 
 if __name__ == "__main__":
-    threading.Thread(target=start_server, daemon=True).start()
-    time.sleep(1)
-    threading.Thread(target=run_inference, daemon=True).start()
-
-    while True:
-        time.sleep(60)
+    start_server()
