@@ -84,15 +84,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/state":
             with STATE.lock:
-                json_response(
-                    self,
-                    200,
-                    {
-                        "observation": STATE.last_observation,
-                        "last_step": STATE.last_step,
-                        "done": STATE.inference_finished,
-                    },
-                )
+                payload = {
+                    "observation": STATE.last_observation,
+                    "last_step": STATE.last_step,
+                    "done": STATE.inference_finished,
+                }
+            json_response(self, 200, payload)
             return
         if self.path == "/":
             json_response(self, 200, {"status": "ok", "service": "openenv-inference"})
