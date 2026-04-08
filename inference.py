@@ -101,7 +101,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         content_type = (self.headers.get("Content-Type") or "").lower()
-        if not content_type.startswith("application/json"):
+        if content_type and "application/json" not in content_type:
             json_response(self, 400, {"error": "Content-Type must be application/json"})
             return
 
