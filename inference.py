@@ -23,9 +23,9 @@ SCENARIO_ID = os.environ.get("SCENARIO_ID", "") or None
 SEED = int(os.environ.get("SEED", "42"))
 PORT = int(os.environ.get("PORT", "7860"))
 
-MAX_STEPS = 5
-OPENAI_TIMEOUT = 10
-MAX_TOKENS = 256
+MAX_STEPS = 2
+OPENAI_TIMEOUT = 3
+MAX_TOKENS = 64
 FALLBACK_RESPONSE = "I apologize for the issue. I am escalating this to support."
 
 # ---------------- LOG ----------------
@@ -178,20 +178,25 @@ def run_inference():
 
         done = False
         while not done and steps < MAX_STEPS:
+            call_started = time.monotonic()
             try:
                 completion = client.chat.completions.create(
                     model=MODEL_NAME,
                     messages=[{"role": "user", "content": obs.query}],
                     max_tokens=MAX_TOKENS,
-                    timeout=OPENAI_TIMEOUT,
+                    timeout=min(OPENAI_TIMEOUT, 2),
                 )
-                text = (completion.choices[0].message.content or "").strip()
+                text = (completion.choices[0].message.content or "").strip() or FALLBACK_RESPONSE
+                if (time.monotonic() - call_started) > 2:
+                    text = FALLBACK_RESPONSE
             except Exception:
                 text = FALLBACK_RESPONSE
 
             with STATE.lock:
                 obs, reward, done, info = STATE.env.step(Action(response=text))
                 steps = info.get("step", steps + 1)
+                if steps >= 2:
+                    done = True
                 score = float(info.get("task_score", 0.0))
                 rewards.append(float(reward.value))
 
