@@ -100,7 +100,8 @@ class Handler(BaseHTTPRequestHandler):
         json_response(self, 404, {"error": "not_found"})
 
     def do_POST(self) -> None:
-        if self.headers.get("Content-Type") != "application/json":
+        content_type = (self.headers.get("Content-Type") or "").lower()
+        if not content_type.startswith("application/json"):
             json_response(self, 400, {"error": "Content-Type must be application/json"})
             return
 
@@ -130,7 +131,12 @@ class Handler(BaseHTTPRequestHandler):
             response_text = body.get("response") or body.get("action") or FALLBACK_RESPONSE
             try:
                 with STATE.lock:
-                    obs, reward, done, info = STATE.env.step(Action(response=response_text))
+                    try:
+                        obs, reward, done, info = STATE.env.step(Action(response=response_text))
+                    except RuntimeError:
+                        # Auto-initialize episode if /step is called before /reset.
+                        STATE.env.reset(scenario_id=SCENARIO_ID, task_name=(TASK_NAME if TASK_NAME in TASKS else "hard"))
+                        obs, reward, done, info = STATE.env.step(Action(response=response_text))
                     payload = {
                         "observation": model_to_dict(obs),
                         "reward": model_to_dict(reward),
@@ -198,9 +204,14 @@ def run_inference() -> None:
                 )
             except Exception as step_exc:
                 safe_action = text.replace('"', "'")[:120]
+                safe_step_error = str(step_exc)
+                safe_step_error = safe_step_error.replace('"', "'")
                 log(
-                    f'[STEP] step={steps} action="{safe_action}" reward=0.00 '
-                    f'done=false error={str(step_exc).replace("\"", "\'")}'
+                    "[STEP] step={} action=\"{}\" reward=0.00 done=false error={}".format(
+                        steps,
+                        safe_action,
+                        safe_step_error,
+                    )
                 )
                 break
 
