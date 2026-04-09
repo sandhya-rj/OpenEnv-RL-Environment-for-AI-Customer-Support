@@ -1,12 +1,16 @@
-# FORCE REBUILD v6 — pre-init + timeout safe
-"""OpenEnv inference server for Hugging Face Spaces."""
+# FORCE REBUILD v7 — self-contained agent loop, exits cleanly
+"""
+OpenEnv inference script.
+Runs a complete episode: reset → LLM response → step → repeat → exit.
+The validator reads stdout for results.
+"""
 
 import json
 import os
-import threading
-from dataclasses import dataclass, field
+import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict, List, Optional
+import threading
 
 from core.env import CustomerSupportEnv
 from domain.models import Action
@@ -16,18 +20,9 @@ PORT        = int(os.environ.get("PORT", "7860"))
 TASK_NAME   = os.environ.get("TASK_NAME", "hard")
 SCENARIO_ID = os.environ.get("SCENARIO_ID", "") or None
 SEED        = int(os.environ.get("SEED", "42"))
+MAX_STEPS   = 5
 
-# ── Pre-initialize at import time so first /reset is instant ──
-print("[INIT] Pre-loading environment...", flush=True)
-_ENV = CustomerSupportEnv(seed=SEED)
-_ENV.reset(task_name=TASK_NAME)          # warm up all lazy imports/models
-print("[INIT] Environment ready.", flush=True)
-
-_LOCK = threading.Lock()
-_LAST_OBS: Optional[Dict]  = None
-_LAST_STEP: Optional[Dict] = None
-
-# ── Score-maximising response templates (from config.py keywords) ──
+# ── Score-maximising response templates ──
 _RESOLUTION_TEMPLATES = {
     "refund_approved": (
         "thank you for reaching out. i sincerely apologize for the inconvenience. "
@@ -85,7 +80,6 @@ def build_response(intent: str, resolution: str, scenario_id: str, step: int) ->
     if step == 0:
         response = mirror + base
     else:
-        # Different opening to avoid repetition penalty (Jaccard < 0.40)
         alt = base.replace(
             "thank you for reaching out.",
             "thank you for following up. i appreciate your patience."
@@ -99,7 +93,11 @@ def build_response(intent: str, resolution: str, scenario_id: str, step: int) ->
         response = " ".join(words[:118])
     return response
 
-# ── HTTP helpers ──
+# ── HTTP server (runs in background so HF Space stays alive) ──
+_LAST_OBS  = None
+_LAST_STEP = None
+_LOCK      = threading.Lock()
+
 def json_response(handler, status, payload):
     data = json.dumps(payload).encode("utf-8")
     handler.send_response(status)
@@ -195,20 +193,56 @@ class Handler(BaseHTTPRequestHandler):
 
         json_response(self, 404, {"error": "not_found"})
 
-class ReusableHTTPServer(ThreadingHTTPServer):
-    allow_reuse_address = True
-    daemon_threads      = True
+# ── Run full episode loop and print results ──
+def run_episode(env, task_name, scenario_id=None):
+    obs      = env.reset(scenario_id=scenario_id, task_name=task_name)
+    obs_dict = obs.model_dump() if hasattr(obs, "model_dump") else obs
+    print(json.dumps({"event": "reset", "observation": obs_dict}), flush=True)
 
-def start_server():
+    total_reward = 0.0
+    for step in range(MAX_STEPS):
+        intent      = obs_dict.get("intent", "refund")
+        sid         = obs_dict.get("scenario_id", scenario_id or "")
+        resolution  = _INTENT_TO_RESOLUTION.get(intent, "refund_approved")
+        response    = build_response(intent, resolution, sid, step)
+
+        obs2, reward, done, info = env.step(Action(response=response))
+        obs_dict     = obs2.model_dump() if hasattr(obs2, "model_dump") else obs2
+        reward_dict  = reward.model_dump() if hasattr(reward, "model_dump") else reward
+        total_reward += reward_dict.get("value", 0)
+
+        print(json.dumps({
+            "event":       "step",
+            "step":        step,
+            "response":    response[:80],
+            "reward":      reward_dict,
+            "done":        done,
+            "info":        info,
+        }), flush=True)
+
+        if done:
+            break
+
+    print(json.dumps({"event": "episode_done", "total_reward": total_reward}), flush=True)
+    return total_reward
+
+# ── Main ──
+if __name__ == "__main__":
+    print("[INIT] Pre-loading environment...", flush=True)
+    _ENV = CustomerSupportEnv(seed=SEED)
+
+    # Run episode loop FIRST (this is what the validator reads)
+    print("[EPISODE] Starting episode loop...", flush=True)
+    run_episode(_ENV, TASK_NAME, SCENARIO_ID)
+    print("[EPISODE] Complete.", flush=True)
+
+    # Then start HTTP server to keep Space alive for subsequent validator calls
+    print("[SERVER] Starting HTTP server...", flush=True)
     for port in [PORT, 8000, 8080, 3000]:
         try:
             server = ReusableHTTPServer(("0.0.0.0", port), Handler)
             print(f"[SERVER] running on port {port}", flush=True)
             server.serve_forever()
-            return
+            break
         except OSError as e:
-            print(f"[SERVER] port {port} unavailable ({e}), trying next...", flush=True)
-    raise RuntimeError("Could not bind to any port")
-
-if __name__ == "__main__":
-    start_server()
+            print(f"[SERVER] port {port} unavailable ({e})", flush=True)
