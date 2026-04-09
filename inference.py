@@ -261,6 +261,12 @@ if __name__ == "__main__":
     _ENV = CustomerSupportEnv(seed=SEED)
     print("[INIT] Ready.", flush=True)
     run_episode(_ENV, TASK_NAME, SCENARIO_ID)
-    print("[DONE] Exiting.", flush=True)
-    import sys
-    sys.exit(0)
+    print("[DONE] Episode complete. Starting HTTP server.", flush=True)
+    for port in [PORT, 8000, 8080, 3000]:
+        try:
+            server = ReusableHTTPServer(("0.0.0.0", port), Handler)
+            print(f"[SERVER] running on port {port}", flush=True)
+            server.serve_forever()
+            break
+        except OSError as e:
+            print(f"[SERVER] port {port} unavailable ({e})", flush=True)
