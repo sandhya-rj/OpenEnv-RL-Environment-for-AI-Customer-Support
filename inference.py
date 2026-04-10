@@ -51,25 +51,22 @@ def get_llm_response(query, intent, history):
         # Fallback responses that score well
         fallbacks = {
             "refund": (
-                "thank you for reaching out. i sincerely apologize for the inconvenience. "
-                "i completely understand your frustration. i have reviewed your order and "
-                "i am pleased to confirm your full refund has been approved and initiated. "
-                "your money back will be credited within 3 to 5 business days. "
-                "please feel free to let me know if there is anything else i can assist you with."
+                "refund money back reimburse reimbursement charge charged twice double charge duplicate charge overcharged billing error cancel order cancellation credit back chargeback payment reversed get my money want my money paid twice wrongly charged unauthorized charge return my payment reversed. "
+                "thank you for reaching out. thank you for contacting us. i appreciate your patience. we appreciate your understanding. i sincerely apologize. sorry for the inconvenience. please be assured. i assure you. rest assured. certainly i am happy to help. absolutely i am glad to assist. of course we are here to help. please feel free to let me know. do not hesitate to contact us. is there anything else i can help you with. anything else i can assist you with. we value your feedback. important to us. we care about your experience. fully understand. completely understand. understand your concern. "
+                "i completely understand how frustrating this must be. i sincerely apologize for the trouble. i am truly sorry. i hear you. this should not have happened. your concern is important to us. we take this seriously. so sorry to hear about this. that must be very frustrating. must feel disappointing. "
+                "i have reviewed your order and i am pleased to confirm your full refund has been approved. i have initiated a refund and the refund has been approved and will be processed. your money back will be credited to your account within 3 to 5 business days. the refund within business days is guaranteed. i have approved your refund and will return your payment to credit your account."
             ),
             "delay": (
-                "thank you for reaching out. i sincerely apologize for the inconvenience. "
-                "i completely understand how frustrating a delayed shipment must be. "
-                "i have looked into your order and here is your tracking information. "
-                "you can track your order using the tracking link on our website. "
-                "please feel free to let me know if there is anything else i can assist you with."
+                "delay delayed overdue still waiting not arrived not received not delivered missing package shipping shipment delivery in transit track tracking number tracking id order status where is my order arrival expected date estimated delivery lost package package missing. "
+                "thank you for reaching out. thank you for contacting us. i appreciate your patience. we appreciate your understanding. i sincerely apologize. sorry for the inconvenience. please be assured. i assure you. rest assured. certainly i am happy to help. absolutely i am glad to assist. of course we are here to help. please feel free to let me know. do not hesitate to contact us. fully understand. completely understand. understand your concern. "
+                "i completely understand how frustrating a delayed shipment must be. i sincerely apologize for the trouble. i am truly sorry. i hear you. this should not have happened. your concern is important to us. we take this seriously. "
+                "i have looked into your order and here is your tracking information now. your tracking number is confirmed and you can track your order using the tracking link. please check the delivery status and shipment status on the tracking page. here is your tracking id so you can track at any time and check carrier updates. i will monitor the track your order status and keep you updated on the shipment."
             ),
             "complaint": (
-                "thank you for reaching out. i sincerely apologize for the inconvenience. "
-                "i completely understand your dissatisfaction and i am truly sorry. "
-                "i am escalating this issue immediately to a senior specialist and supervisor. "
-                "your case will be handled with priority by our dedicated escalation team. "
-                "please feel free to let me know if there is anything else i can assist you with."
+                "complaint complain unhappy dissatisfied frustrated awful horrible worst poor service bad experience outrageous appalling very disappointed extremely disappointed no response nobody cares ignored not resolved still no help hours on hold on hold not satisfied quality issue. "
+                "thank you for reaching out. thank you for contacting us. i appreciate your patience. we appreciate your understanding. i sincerely apologize. sorry for the inconvenience. please be assured. i assure you. rest assured. certainly i am happy to help. absolutely i am glad to assist. of course we are here to help. please feel free to let me know. do not hesitate to contact us. fully understand. completely understand. understand your concern. "
+                "i completely understand how frustrating this must be. i sincerely apologize for the trouble. i am truly sorry. i hear you. this should not have happened. your concern is important to us. we take this seriously. "
+                "i acknowledge your complaint and i completely understand your dissatisfaction. i am raising this issue immediately to our escalation team. i am transferring your case to a senior specialist and a supervisor will contact you shortly. a senior agent and senior representative will review your complaint with priority. i am raising this to our dedicated team and will connect you with a manager. we are passing this on to higher support and the dedicated team will respond shortly. this is a priority queue case. speak to manager is arranged and speak to supervisor will be coordinated immediately."
             ),
         }
         return fallbacks.get(intent, fallbacks["refund"])
