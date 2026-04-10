@@ -4,3 +4,4 @@ PyYAML==6.0.3
 pytest==8.4.2
 httpx==0.28.1
 tqdm==4.67.3
+requests==2.32.3
